@@ -34,11 +34,20 @@ import { getPages } from "./tools/read/get-pages.js";
 import { createImage } from "./tools/create/create-image.js";
 import { addPrototypeLink } from "./tools/create/add-prototype-link.js";
 
-export async function getServer(server: Server): Promise<McpServer> {
-
+// Shared state (socket.io listeners + task queue). Create ONCE per process.
+export function createTaskManager(server: Server): TaskManager {
     const taskManager = new TaskManager();
     const socketManager = new SocketManager(server);
-    const orchestrator = new Orchestrator(socketManager, taskManager);
+    new Orchestrator(socketManager, taskManager);
+    return taskManager;
+}
+
+export async function getServer(server: Server): Promise<McpServer> {
+    return createMcpServer(createTaskManager(server));
+}
+
+// An McpServer can only be connected to one transport, so create one per session.
+export function createMcpServer(taskManager: TaskManager): McpServer {
 
     const mcpServer = new McpServer({
         name: `MCP Server for Figma`,

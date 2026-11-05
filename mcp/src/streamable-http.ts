@@ -3,7 +3,7 @@ import { generateUUID } from "./utils.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
-import { getServer } from "./server.js";
+import { createMcpServer, createTaskManager } from "./server.js";
 import { config, PORT } from "./config.js";
 import { Server } from "socket.io";
 import http from "http";
@@ -72,7 +72,7 @@ export async function startStreamableHTTP() {
     // Map to store transports by session ID
     const transports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
-    const server = await getServer(io);
+    const taskManager = createTaskManager(io);
 
     app.post('/mcp', async (req: express.Request, res: express.Response) => {
         try {
@@ -94,6 +94,9 @@ export async function startStreamableHTTP() {
                         transports[sessionId] = transport;
                     }
                 });
+
+                // One McpServer per session: an McpServer can only be bound to one transport
+                const server = createMcpServer(taskManager);
 
                 // Clean up transport when closed
                 transport.onclose = () => {
