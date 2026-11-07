@@ -4,36 +4,68 @@ import "./main.base.css";
 import "./main.theme.css";
 import MainContainer from "./components/main-container";
 import MenuContainer from "./components/menu-container";
-import { io } from "socket.io-client";
+import { io, Socket } from "socket.io-client";
 import { emit, on } from "@create-figma-plugin/utilities";
 import {
   StartTaskHandler,
   TaskFinishedHandler,
   TaskFailedHandler,
+  RequestPluginInfoHandler,
+  PluginInfoHandler,
+  SavePluginTokenHandler,
 } from "../main/types";
 import ErrorIcon from "@mui/icons-material/Error";
 import CheckIcon from "@mui/icons-material/Check";
 import QuestionMarkIcon from "@mui/icons-material/QuestionMark";
-import CopyIcon from "@mui/icons-material/CopyAll";
 import Text from "./components/shared/text/text";
 import { useEffect, useRef } from "react";
 import { Box, Button, Link, Popover } from "@mui/material";
-import { Typography } from "@mui/material";
 import Logs from "./components/mui/Logs";
 
-const AutosaveTimeout = 10000;
+// MCP server address. Set VITE_MCP_SERVER_URL at build time, e.g.
+//   VITE_MCP_SERVER_URL=wss://figma-mcp.example.com npm run build
+// The domain must also be listed in manifest.json → networkAccess.allowedDomains.
+const SERVER_URL: string =
+  (import.meta.env.VITE_MCP_SERVER_URL as string | undefined) ||
+  "ws://localhost:38450";
+const MCP_HTTP_URL = `${SERVER_URL.replace(/^ws/, "http").replace(/\/+$/, "")}/mcp`;
+
+type ConnectionState =
+  | { kind: "connecting" }
+  | { kind: "disconnected" }
+  | { kind: "pairing"; code: string; expiresAt: number }
+  | { kind: "paired"; email?: string; local?: boolean };
+
+function copyText(value: string) {
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+  } catch (error) {
+    console.error("Copy failed", error);
+  }
+}
 
 function Plugin(props: any) {
-  const [connected, setConnected] = React.useState(false);
+  const [state, setState] = React.useState<ConnectionState>({ kind: "connecting" });
+  const [fileName, setFileName] = React.useState<string>("");
+  const [copied, setCopied] = React.useState(false);
   const [helpOpen, setHelpOpen] = React.useState(false);
   const [helpAnchorEl, setHelpAnchorEl] =
     React.useState<HTMLButtonElement | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const handleHelpOpen = (event: React.MouseEvent<HTMLButtonElement>) => {
     setHelpOpen(true);
     setHelpAnchorEl(event.currentTarget);
   };
 
-  const mcpServers = `
+  const mcpServers = SERVER_URL.includes("localhost")
+    ? `
   {
     "mcpServers": {
       "Figma": {
@@ -42,78 +74,163 @@ function Plugin(props: any) {
       }
     }
   }
+  `
+    : `
+  {
+    "mcpServers": {
+      "Figma": {
+        "type": "http",
+        "url": "${MCP_HTTP_URL}"
+      }
+    }
+  }
   `;
 
   const addLogRef = useRef<((log: string) => void) | null>(null);
   useEffect(() => {
-    const socket = io("ws://localhost:38450", {
-      transports: ["websocket", "polling"],
-      upgrade: true,
-      rememberUpgrade: false,
-    });
-    socket.on("connect", () => {
-      console.log("connected to MCP server");
-      addLogRef.current?.("Connected to MCP server");
-      setConnected(true);
-    });
-    socket.on("disconnect", () => {
-      console.log("disconnected from MCP server");
-      addLogRef.current?.("Disconnected from MCP server");
-      setConnected(false);
-    });
-    socket.on("message", (message: string) => {
-      addLogRef.current?.(`Message from MCP server: ${message}`);
-      console.log("message from MCP server:", message);
-    });
+    const unsubscribers: Array<() => void> = [];
 
-    socket.on("start-task", (task: any) => {
-      emit<StartTaskHandler>("START_TASK", {
-        taskId: task.id,
-        command: task.command,
-        args: task.args,
+    // 1. Ask the main thread for the file name and the saved pairing token, then connect
+    unsubscribers.push(
+      on<PluginInfoHandler>("PLUGIN_INFO", (info: { fileName: string; pluginToken: string | null }) => {
+        setFileName(info.fileName);
+        connect(info.fileName, info.pluginToken);
+      })
+    );
+    emit<RequestPluginInfoHandler>("REQUEST_PLUGIN_INFO", SERVER_URL);
+
+    function connect(currentFileName: string, pluginToken: string | null) {
+      const socket = io(SERVER_URL, {
+        transports: ["websocket", "polling"],
+        upgrade: true,
+        rememberUpgrade: false,
+        auth: pluginToken ? { pluginToken } : {},
       });
-      console.log("start-task", task);
-      addLogRef.current?.(`Task started: ${task.command} (ID: ${task.id})`);
-    });
+      socketRef.current = socket;
 
-    on<TaskFinishedHandler>("TASK_FINISHED", (task: TaskFinishedHandler) => {
-      socket.emit("task-finished", task);
-      addLogRef.current?.(`Task finished: ${task.taskId}`);
-    });
+      socket.on("connect", () => {
+        addLogRef.current?.("Connected to MCP server");
+        socket.emit("hello", { fileName: currentFileName });
+      });
+      socket.on("disconnect", () => {
+        addLogRef.current?.("Disconnected from MCP server");
+        setState({ kind: "disconnected" });
+      });
+      socket.on("connect_error", (error: Error) => {
+        setState({ kind: "disconnected" });
+        console.log("connect_error", error.message);
+      });
 
-    on<TaskFailedHandler>("TASK_FAILED", (task: TaskFailedHandler) => {
-      socket.emit("task-failed", task);
-      addLogRef.current?.(`Task failed: ${task.taskId}`);
-    });
+      socket.on("pairing-code", (data: { code: string; expiresAt: number }) => {
+        setState({ kind: "pairing", code: data.code, expiresAt: data.expiresAt });
+        addLogRef.current?.(`Pairing code: ${data.code}`);
+      });
+      socket.on("paired", (data: { email?: string; pluginToken?: string; local?: boolean }) => {
+        const next: ConnectionState = { kind: "paired" };
+        if (data.email) next.email = data.email;
+        if (data.local) next.local = true;
+        setState(next);
+        if (data.pluginToken) {
+          // Remember the pairing so the plugin reconnects without a new code
+          emit<SavePluginTokenHandler>("SAVE_PLUGIN_TOKEN", SERVER_URL, data.pluginToken);
+          socket.auth = { pluginToken: data.pluginToken };
+        }
+        addLogRef.current?.(data.local ? "Connected (local mode)" : `Paired with ${data.email}`);
+      });
+      socket.on("pairing-revoked", () => {
+        emit<SavePluginTokenHandler>("SAVE_PLUGIN_TOKEN", SERVER_URL, null);
+        socket.auth = {};
+        addLogRef.current?.("Saved pairing is no longer valid, a new code is required");
+      });
 
-    socket.onAny((event: string, data: any) => {
-    });
+      socket.on("start-task", (task: any) => {
+        emit<StartTaskHandler>("START_TASK", {
+          taskId: task.id,
+          command: task.command,
+          args: task.args,
+        });
+        addLogRef.current?.(`Task started: ${task.command} (ID: ${task.id})`);
+      });
+
+      unsubscribers.push(
+        on<TaskFinishedHandler>("TASK_FINISHED", (task: TaskFinishedHandler) => {
+          socket.emit("task-finished", task);
+          addLogRef.current?.(`Task finished: ${task.taskId}`);
+        })
+      );
+
+      unsubscribers.push(
+        on<TaskFailedHandler>("TASK_FAILED", (task: TaskFailedHandler) => {
+          socket.emit("task-failed", task);
+          addLogRef.current?.(`Task failed: ${task.taskId}`);
+        })
+      );
+    }
+
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+      socketRef.current?.disconnect();
+    };
   }, []);
+
+  const unpair = () => {
+    emit<SavePluginTokenHandler>("SAVE_PLUGIN_TOKEN", SERVER_URL, null);
+    if (socketRef.current) {
+      socketRef.current.auth = {};
+      socketRef.current.emit("unpair");
+    }
+    addLogRef.current?.("Unpaired");
+  };
+
+  const copyCode = (code: string) => {
+    copyText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   return (
     <MainContainer>
       <MenuContainer>
-        {!connected && (
+        {(state.kind === "disconnected" || state.kind === "connecting") && (
           <div style={{ display: "flex", alignItems: "center" }}>
             <ErrorIcon
               sx={{ color: "red" }}
               titleAccess="Not connected to MCP server"
             />
-            <Text>Not connected to MCP server</Text>
+            <Text>
+              {state.kind === "connecting" ? "Connecting to MCP server…" : "Not connected to MCP server"}
+            </Text>
           </div>
         )}
 
-        {connected && (
+        {state.kind === "pairing" && (
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <ErrorIcon sx={{ color: "orange" }} titleAccess="Waiting for pairing" />
+            <Text>Waiting for pairing</Text>
+          </div>
+        )}
+
+        {state.kind === "paired" && (
           <div style={{ display: "flex", alignItems: "center" }}>
             <CheckIcon
               sx={{ color: "green" }}
               titleAccess="Connected to MCP server"
             />
-            <Text>Connected to MCP server</Text>
+            <Text>
+              {state.local ? "Connected to MCP server" : `Connected as ${state.email}`}
+            </Text>
           </div>
         )}
-        <Button onClick={handleHelpOpen}>
-          <QuestionMarkIcon titleAccess="Help" style={{ cursor: "pointer" }} />
-        </Button>
+        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+          {state.kind === "paired" && !state.local && (
+            <Button size="small" onClick={unpair}>
+              Disconnect
+            </Button>
+          )}
+          <Button onClick={handleHelpOpen}>
+            <QuestionMarkIcon titleAccess="Help" style={{ cursor: "pointer" }} />
+          </Button>
+        </div>
         <Popover
           open={helpOpen}
           onClose={() => setHelpOpen(false)}
@@ -159,7 +276,8 @@ function Plugin(props: any) {
               </div>
             </Text>
 
-            <Text>3. Save changes and restart your client if needed</Text>
+            <Text>3. Save changes and restart your client if needed. Log in when your client asks.</Text>
+            <Text>4. Tell your AI the pairing code shown in this plugin.</Text>
             <Link
               href="https://github.com/antonytm/figma-mcp-server"
               target="_blank"
@@ -169,11 +287,46 @@ function Plugin(props: any) {
           </div>
         </Popover>
       </MenuContainer>
-      <Box 
-        sx={{ 
-          flex: 1, 
-          minHeight: 0, 
-          display: "flex", 
+      {state.kind === "pairing" && (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "6px",
+            padding: "12px",
+            marginBottom: "12px",
+            border: "1px solid var(--figma-color-border)",
+            borderRadius: "6px",
+          }}
+        >
+          <Text>Pairing code for “{fileName}”</Text>
+          <Box
+            onClick={() => copyCode(state.code)}
+            title="Click to copy"
+            sx={{
+              fontFamily: "monospace",
+              fontSize: "26px",
+              fontWeight: 700,
+              letterSpacing: "3px",
+              cursor: "pointer",
+              userSelect: "all",
+            }}
+          >
+            {state.code}
+          </Box>
+          <Text>
+            {copied
+              ? "Copied!"
+              : `Tell your AI: "connect to Figma with code ${state.code}"`}
+          </Text>
+        </Box>
+      )}
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
           flexDirection: "column",
           overflow: "hidden"
         }}

@@ -16,6 +16,8 @@
       "ws://localhost:38450/",
       "https://localhost:38450/",
       "wss://localhost:38450/",
+      "https://fi.pauletti.dev",
+      "wss://fi.pauletti.dev",
       "https://fonts.googleapis.com",
       "https://fonts.gstatic.com"
     ],

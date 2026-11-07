@@ -43,5 +43,6 @@ export default {
     "events",
     "zlib",
     "statuses",
+    "pkce-challenge",
   ],
 };

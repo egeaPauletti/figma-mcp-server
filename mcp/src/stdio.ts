@@ -1,9 +1,11 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { getServer } from './server.js';
-import { config, PORT } from './config.js';
+import { createFigmaBridge, createMcpServer } from './server.js';
+import { config } from './config.js';
 import { Server } from 'socket.io';
 import http from 'http';
 
+// Local, single user mode: no authentication and no pairing.
+// Note: stdout is the MCP channel, so logs must go to stderr.
 export async function startSTDIO() {
     try {
         const httpServer = http.createServer();
@@ -21,14 +23,14 @@ export async function startSTDIO() {
             pingTimeout: 60000,
             pingInterval: 25000
         });
-        
-        const server = await getServer(socketServer);
+
+        const bridge = createFigmaBridge(socketServer, "local");
+        const server = createMcpServer(bridge);
         const transport = new StdioServerTransport();
         await server.connect(transport);
-        
-        // Start HTTP server for Socket.IO connections from Figma plugin
-        httpServer.listen(PORT, () => {
-            console.log(`Socket.IO server listening on http://localhost:${PORT}`);
+
+        httpServer.listen(config.PORT, () => {
+            console.error(`Socket.IO server listening on http://localhost:${config.PORT}`);
         });
     } catch (error) {
         console.error('Error starting STDIO server:', error);

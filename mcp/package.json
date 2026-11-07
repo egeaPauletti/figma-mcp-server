@@ -14,7 +14,8 @@
     "bundle": "rollup -c",
     "start": "tsc && node dist/index.js",
     "dev": "npm run build && concurrently -n \"TSC,NODEMON\" -c \"blue,green\" \"tsc --watch\" \"nodemon\"",
-    "inspector": "npx @modelcontextprotocol/inspector@latest"
+    "inspector": "npx @modelcontextprotocol/inspector@latest",
+    "user": "node dist/cli/user.js"
   },
   "author": "",
   "license": "ISC",
@@ -24,6 +25,7 @@
     "dotenv": "^17.4.2",
     "esm": "^3.2.25",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.7.3",
     "node-fetch": "^3.3.2",
     "socket.io": "^4.8.3",
     "zod": "^4.6.5"
@@ -35,7 +37,7 @@
     "@rollup/plugin-json": "^6.1.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@types/express": "^5.0.6",
-    "@types/node": "^20.19.43",
+    "@types/node": "^24.19.2",
     "concurrently": "^9.2.4",
     "nodemon": "^3.1.14",
     "rollup": "^4.63.2",
@@ -48,5 +50,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/Antonytm/figma-mcp-server.git"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }

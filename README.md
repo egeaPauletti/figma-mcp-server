@@ -102,9 +102,87 @@ MCP server listen to the WebSockets server. If there are any messages from Figma
 
 Plugin gives access to your design document for external systems: AI Agents that you will connect. It acts as a bridge in the similar way as the official Figma MCP server. And, similar to the official MCP server it works on local machine and do not expose any information to the networks.
 
-If you want to use it in the network, please do it on your own risk.
+If you want to use it in the network, use the `streamable-http` transport described in [Self-hosting](#self-hosting-multi-user-oauth): it requires OAuth login for MCP clients and pairing codes for Figma plugins.
 
 If you found any security issue, please report it via GitHub issue. 
+
+## Self-hosting (multi-user, OAuth)
+
+With `TRANSPORT=streamable-http` the server is meant to run on a VPS and be shared by many people:
+
+- **MCP clients authenticate with OAuth 2.1** (authorization code + PKCE, dynamic client registration, refresh token rotation). The server is its own authorization server: clients discover it from `/.well-known/oauth-protected-resource/mcp`, open the login page in the browser and receive tokens. Data is stored in SQLite (`node:sqlite`, Node >= 22.13).
+- **Figma plugins are paired, not trusted.** When the plugin connects it shows a pairing code (e.g. `K7Q4-XM2P`, valid for 10 minutes). The user tells the AI *"connect to Figma with code K7Q4-XM2P"* and the `connect-figma` tool binds that MCP session to that plugin. The plugin stores a pairing token (per user, per file) and re-pairs automatically next time.
+- **Commands are routed** only to the plugin paired with the session. Several people can work in the same Figma file (each one opens the plugin) or in different files at the same time. `list-figma-connections` / `connect-figma({ connectionId })` switch between files of the same user.
+
+The `stdio` transport keeps the original local behaviour (no login, no pairing).
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRANSPORT` | `stdio` | `streamable-http` to enable the HTTP server with OAuth |
+| `PUBLIC_URL` | `http://localhost:38450` | Public URL as seen by clients, used as OAuth issuer. Must be `https://` outside localhost |
+| `PORT` | `38450` | Listening port |
+| `DB_PATH` | `./data/figma-mcp.db` | SQLite file (users, clients, tokens, pairings) |
+| `TASK_TIMEOUT_MS` | `30000` | How long a tool waits for the plugin |
+| `ACCESS_TOKEN_TTL` | `3600` | Access token lifetime (seconds) |
+| `REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime (seconds) |
+| `ALLOWED_ORIGINS` | *(any)* | Comma separated CORS origins for browser based MCP clients |
+
+### Users
+
+Users are created by the administrator (there is no public sign-up):
+
+```bash
+npm run user -- add alice@example.com        # asks for the password
+npm run user -- list
+npm run user -- passwd alice@example.com     # also revokes her sessions
+npm run user -- disable alice@example.com    # revokes tokens and plugin pairings
+npm run user -- revoke-tokens alice@example.com
+```
+
+With Docker: `docker exec -it figma-mcp node dist/cli/user.js add alice@example.com`.
+
+### Docker + Caddy
+
+```bash
+cd mcp
+docker build -f docker/linux/Dockerfile -t figma-mcp .
+docker run -d --name figma-mcp --restart unless-stopped \
+  -p 127.0.0.1:38450:38450 \
+  -e PUBLIC_URL=https://fi.pauletti.dev \
+  -v figma-mcp-data:/data \
+  figma-mcp
+```
+
+`Caddyfile` (TLS and WebSocket upgrade are automatic):
+
+```
+fi.pauletti.dev {
+    reverse_proxy 127.0.0.1:38450
+}
+```
+
+### Client configuration
+
+```json
+{
+  "mcpServers": {
+    "Figma": { "type": "http", "url": "https://fi.pauletti.dev/mcp" }
+  }
+}
+```
+
+Claude Code: `claude mcp add --transport http figma https://fi.pauletti.dev/mcp`, then `/mcp` to log in.
+
+### Plugin
+
+Build the plugin pointing to your server and allow the domain in [plugin/manifest.json](plugin/manifest.json) (`networkAccess.allowedDomains`: add `https://fi.pauletti.dev` and `wss://fi.pauletti.dev`):
+
+```bash
+cd plugin
+VITE_MCP_SERVER_URL=wss://fi.pauletti.dev npm run build
+```
 
 ## Alternatives
 

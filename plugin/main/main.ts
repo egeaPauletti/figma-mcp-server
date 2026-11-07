@@ -1,4 +1,4 @@
-import { StartTaskHandler, TaskFinishedHandler, TaskFailedHandler } from './types';
+import { StartTaskHandler, TaskFinishedHandler, TaskFailedHandler, RequestPluginInfoHandler, PluginInfoHandler, SavePluginTokenHandler } from './types';
 import { ToolResult } from './tools/tool-result';
 import { serializeNode } from './serialization/serialization';
 import { getNodeInfo } from './tools/read/get-node-info';
@@ -30,7 +30,44 @@ import { getPages } from 'tools/read/get-pages';
 import { createImage } from 'tools/create/create-image';
 import { addPrototypeLink } from 'tools/create/add-prototype-link';
 
+// A random, non-secret id stored in the document, so each file gets its own pairing.
+// The pairing token itself is kept in clientStorage (private to the current user).
+function getFileId(): string {
+  let fileId = figma.root.getPluginData('mcpFileId');
+  if (!fileId) {
+    fileId = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+    figma.root.setPluginData('mcpFileId', fileId);
+  }
+  return fileId;
+}
+
+function pluginTokenKey(serverUrl: string): string {
+  return `pluginToken:${serverUrl}:${getFileId()}`;
+}
+
 function main() {
+
+  on<RequestPluginInfoHandler>('REQUEST_PLUGIN_INFO', async function (serverUrl: string) {
+    let pluginToken: string | null = null;
+    try {
+      pluginToken = (await figma.clientStorage.getAsync(pluginTokenKey(serverUrl))) ?? null;
+    } catch (error) {
+      console.error('Could not read pairing token', error);
+    }
+    emit<PluginInfoHandler>('PLUGIN_INFO', { fileName: figma.root.name, pluginToken });
+  });
+
+  on<SavePluginTokenHandler>('SAVE_PLUGIN_TOKEN', async function (serverUrl: string, token: string | null) {
+    try {
+      if (token) {
+        await figma.clientStorage.setAsync(pluginTokenKey(serverUrl), token);
+      } else {
+        await figma.clientStorage.deleteAsync(pluginTokenKey(serverUrl));
+      }
+    } catch (error) {
+      console.error('Could not save pairing token', error);
+    }
+  });
 
   on<StartTaskHandler>('START_TASK', async function (task: StartTaskHandler) {
     try {

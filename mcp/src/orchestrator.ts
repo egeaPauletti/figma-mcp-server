@@ -1,33 +1,29 @@
 import type { SocketManager } from "./socket-manager.js";
-import type { TaskManager } from "./task-manager.js";
+import type { StartTaskMessage, TaskQueue } from "./task-manager.js";
 
 export class Orchestrator {
 
-    constructor(socketManager: SocketManager, taskManager: TaskManager) {
-        this.socketManager = socketManager;
-        this.taskManager = taskManager;
-
-        // Subscribe to task added events
-        // Send start-task message via web socket to the Figma plugin
-        this.taskManager.onTaskAdded((task) => {
-            this.socketManager.sendMessage('start-task', task);
+    constructor(socketManager: SocketManager, taskQueue: TaskQueue) {
+        // Task added → send start-task only to the plugin the task is addressed to
+        taskQueue.onTaskAdded((task) => {
+            const message: StartTaskMessage = { id: task.id, command: task.command, args: task.args };
+            if (!socketManager.sendTo(task.socketId, 'start-task', message)) {
+                throw new Error("The Figma plugin is no longer connected");
+            }
         });
 
-
-        // Subscribe to task finished events
-        // Raise task completed event in the task manager on me
-        this.socketManager.onTaskFinished((task) => {
-            this.taskManager.updateTask(task.taskId, task.content, 'completed');
+        // Plugin answered → complete the task (only if it came from the same socket)
+        socketManager.onTaskFinished((socketId, task) => {
+            taskQueue.completeFromSocket(socketId, task.taskId, task.content, false);
         });
 
-        // Subscribe to task failed events
-        // Raise task failed event in the task manager on message received
-        this.socketManager.onTaskError((task) => {
-            this.taskManager.updateTask(task.taskId, task.content, 'failed');
+        socketManager.onTaskError((socketId, task) => {
+            taskQueue.completeFromSocket(socketId, task.taskId, task.content, true);
+        });
+
+        // Plugin disconnected → fail its pending tasks immediately
+        socketManager.onDisconnect((socketId) => {
+            taskQueue.failTasksForSocket(socketId, "The Figma plugin disconnected before finishing the task");
         });
     }
-
-    private socketManager: SocketManager;
-    private taskManager: TaskManager;
-
 }

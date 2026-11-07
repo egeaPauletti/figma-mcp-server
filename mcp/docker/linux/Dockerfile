@@ -1,4 +1,4 @@
-FROM node:lts-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 
@@ -14,6 +14,14 @@ RUN npm run bundle
 
 # Remove dev dependencies
 RUN npm prune --production
+
+# SQLite database (users, OAuth clients, tokens, plugin pairings)
+VOLUME /data
+
+ENV TRANSPORT=streamable-http \
+    PORT=38450 \
+    DB_PATH=/data/figma-mcp.db \
+    NODE_ENV=production
 
 # Default start
 CMD ["node","dist/index.js"]
